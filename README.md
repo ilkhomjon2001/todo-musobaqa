@@ -1,8 +1,15 @@
 # Musobaqa ToDo
 
 Robbit Akademiyasi robototexnika musobaqasi va bitiruv marosimi uchun
-umumiy (shared) checkbox ro'yxati. `window.storage` orqali barcha
-foydalanuvchilar uchun bir xil holatda saqlanadi.
+checkbox ro'yxati.
+
+## Saqlash
+
+Sahifa `window.storage` (umumiy saqlash) mavjud bo'lsa o'shandan foydalanadi,
+aks holda `localStorage`ga tushadi. Oddiy hosting'da (Vercel, GitHub Pages)
+`window.storage` **yo'q**, shuning uchun holat har bir qurilmada alohida
+saqlanadi. Haqiqiy umumiy (barcha foydalanuvchilar uchun bir xil) ro'yxat
+kerak bo'lsa, backend qo'shish zarur — masalan Vercel KV yoki Supabase.
 
 ## Deploy (Vercel)
 

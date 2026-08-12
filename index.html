@@ -234,6 +234,7 @@
     background:var(--teal); margin-right:6px;
     animation:pulse 2s infinite;
   }
+  .sync-dot.off{background:var(--orange); animation:none;}
   @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
 
   @media(max-width:600px){
@@ -270,7 +271,7 @@
 
   <div id="sections"></div>
 
-  <div class="foot"><span class="sync-dot"></span>o'zgarishlar hammaga real vaqtda ko'rinadi</div>
+  <div class="foot"><span class="sync-dot" id="syncDot"></span><span id="syncText">yuklanmoqda…</span></div>
 </div>
 
 <script>
@@ -367,22 +368,86 @@ DATA.forEach(sec => sec.items.forEach((_, i) => allIds.push(sec.id + "-" + i)));
 
 const STORAGE_KEY = "musobaqa-todo-state";
 
-async function loadState(){
-  try{
+/* ---------- saqlash qatlami ----------
+   window.storage (umumiy) mavjud bo'lsa — o'shandan foydalanamiz.
+   Bo'lmasa localStorage'ga tushamiz, shunda hech bo'lmasa shu qurilmada
+   belgilar saqlanib qoladi (ilgari xato bo'lganda state butunlay tozalanardi). */
+const SHARED = !!(window.storage
+  && typeof window.storage.get === "function"
+  && typeof window.storage.set === "function");
+
+const backend = SHARED ? {
+  async get(){
     const res = await window.storage.get(STORAGE_KEY, true);
-    if(res && res.value){ state = JSON.parse(res.value); }
-  }catch(e){ state = {}; }
+    return res && res.value ? res.value : null;
+  },
+  async set(raw){ await window.storage.set(STORAGE_KEY, raw, true); }
+} : {
+  async get(){ return localStorage.getItem(STORAGE_KEY); },
+  async set(raw){ localStorage.setItem(STORAGE_KEY, raw); }
+};
+
+// Hali serverda tasdiqlanmagan lokal o'zgarishlar: id -> {value, at}
+const pending = new Map();
+const PENDING_TTL = 30000;
+
+function setSync(ok, text){
+  const dot = document.getElementById("syncDot");
+  const txt = document.getElementById("syncText");
+  if(dot) dot.classList.toggle("off", !ok);
+  if(txt) txt.textContent = text;
+}
+
+function signature(obj){ return allIds.map(id => obj[id] ? "1" : "0").join(""); }
+
+async function loadState(){
+  let raw;
+  try{
+    raw = await backend.get();
+  }catch(e){
+    // MUHIM: xato bo'lganda state'ni tozalamaymiz — aks holda belgilar o'chib ketadi
+    setSync(false, "saqlashda xato — belgilar faqat ekranda");
+    return;
+  }
+
+  let remote = {};
+  if(raw){
+    try{ remote = JSON.parse(raw) || {}; }
+    catch(e){ remote = {}; }
+  }
+
+  // Lokal, hali tasdiqlanmagan o'zgarishlarni remote ustiga qo'yamiz
+  const now = Date.now();
+  pending.forEach((rec, id) => {
+    if(now - rec.at > PENDING_TTL){ pending.delete(id); return; }
+    if(!!remote[id] === !!rec.value){ pending.delete(id); return; } // tasdiqlandi
+    remote[id] = rec.value;
+  });
+
+  if(signature(remote) === signature(state)) return; // o'zgarish yo'q — qayta chizmaymiz
+  state = remote;
   render();
 }
 
+let saving = false, saveQueued = false;
 async function saveState(){
+  if(saving){ saveQueued = true; return; }
+  saving = true;
   try{
-    await window.storage.set(STORAGE_KEY, JSON.stringify(state), true);
-  }catch(e){ console.error("storage error", e); }
+    await backend.set(JSON.stringify(state));
+    setSync(true, SHARED ? "o'zgarishlar hammaga ko'rinadi" : "shu qurilmada saqlandi");
+  }catch(e){
+    console.error("storage error", e);
+    setSync(false, "saqlanmadi — internetni tekshiring");
+  }
+  saving = false;
+  if(saveQueued){ saveQueued = false; saveState(); }
 }
 
 function toggle(id){
-  state[id] = !state[id];
+  const value = !state[id];
+  state[id] = value;
+  pending.set(id, { value, at: Date.now() });
   render();
   saveState();
 }
@@ -476,9 +541,17 @@ function render(){
   });
 }
 
+render();
+setSync(true, SHARED ? "o'zgarishlar hammaga ko'rinadi" : "shu qurilmada saqlanadi");
 loadState();
-// light polling so changes from other viewers show up without a manual refresh
-setInterval(loadState, 4000);
+
+if(SHARED){
+  // boshqa foydalanuvchilarning o'zgarishlari uchun yengil polling
+  setInterval(loadState, 4000);
+}else{
+  // localStorage rejimida: boshqa tab o'zgartirsa xabar keladi, polling kerak emas
+  window.addEventListener("storage", e => { if(e.key === STORAGE_KEY) loadState(); });
+}
 </script>
 </body>
 </html>
