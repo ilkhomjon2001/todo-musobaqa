@@ -367,29 +367,50 @@ let allIds = [];
 DATA.forEach(sec => sec.items.forEach((_, i) => allIds.push(sec.id + "-" + i)));
 
 const STORAGE_KEY = "musobaqa-todo-state";
+const API = "/api/state";
+const POLL_MS = 8000;
 
 /* ---------- saqlash qatlami ----------
-   window.storage (umumiy) mavjud bo'lsa — o'shandan foydalanamiz.
-   Bo'lmasa localStorage'ga tushamiz, shunda hech bo'lmasa shu qurilmada
-   belgilar saqlanib qoladi (ilgari xato bo'lganda state butunlay tozalanardi). */
-const SHARED = !!(window.storage
-  && typeof window.storage.get === "function"
-  && typeof window.storage.set === "function");
+   Asosiy: /api/state (Upstash Redis) — hamma bir xil ro'yxatni ko'radi.
+   Backend javob bermasa (lokal ochilgan fayl, oflayn, sozlanmagan) —
+   localStorage'ga tushamiz, shunda belgilar hech bo'lmasa yo'qolmaydi. */
 
-const backend = SHARED ? {
+const remoteBackend = {
   async get(){
-    const res = await window.storage.get(STORAGE_KEY, true);
-    return res && res.value ? res.value : null;
+    const r = await fetch(API, { cache:"no-store" });
+    if(!r.ok) throw new Error("api " + r.status);
+    return (await r.json()).items || {};
   },
-  async set(raw){ await window.storage.set(STORAGE_KEY, raw, true); }
-} : {
-  async get(){ return localStorage.getItem(STORAGE_KEY); },
-  async set(raw){ localStorage.setItem(STORAGE_KEY, raw); }
+  async patch(items){
+    const r = await fetch(API, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ patch: items })
+    });
+    if(!r.ok) throw new Error("api " + r.status);
+    return (await r.json()).items || {};
+  }
 };
 
-// Hali serverda tasdiqlanmagan lokal o'zgarishlar: id -> {value, at}
+const localBackend = {
+  async get(){
+    try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
+    catch(e){ return {}; }
+  },
+  async patch(items){
+    const cur = await localBackend.get();
+    Object.assign(cur, items);
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(cur)); }catch(e){}
+    return cur;
+  }
+};
+
+let backend = localBackend;
+let SHARED = false;
+
+// Hali saqlanmagan lokal o'zgarishlar: id -> {value, at}
 const pending = new Map();
-const PENDING_TTL = 30000;
+const PENDING_TTL = 60000;
 
 function setSync(ok, text){
   const dot = document.getElementById("syncDot");
@@ -398,47 +419,59 @@ function setSync(ok, text){
   if(txt) txt.textContent = text;
 }
 
+function okText(){
+  return SHARED ? "o'zgarishlar hammaga ko'rinadi" : "faqat shu qurilmada saqlanadi";
+}
+
 function signature(obj){ return allIds.map(id => obj[id] ? "1" : "0").join(""); }
 
-async function loadState(){
-  let raw;
-  try{
-    raw = await backend.get();
-  }catch(e){
-    // MUHIM: xato bo'lganda state'ni tozalamaymiz — aks holda belgilar o'chib ketadi
-    setSync(false, "saqlashda xato — belgilar faqat ekranda");
-    return;
-  }
-
-  let remote = {};
-  if(raw){
-    try{ remote = JSON.parse(raw) || {}; }
-    catch(e){ remote = {}; }
-  }
-
-  // Lokal, hali tasdiqlanmagan o'zgarishlarni remote ustiga qo'yamiz
+// Serverdan kelgan holatni qabul qilamiz, lekin hali saqlanmagan lokal
+// o'zgarishlar ustma-ust qo'yiladi — shuning uchun yangi bosilgan belgi
+// eski javob tufayli qaytib ochilmaydi.
+function applyRemote(remote){
+  const merged = Object.assign({}, remote || {});
   const now = Date.now();
   pending.forEach((rec, id) => {
     if(now - rec.at > PENDING_TTL){ pending.delete(id); return; }
-    if(!!remote[id] === !!rec.value){ pending.delete(id); return; } // tasdiqlandi
-    remote[id] = rec.value;
+    merged[id] = rec.value;
   });
-
-  if(signature(remote) === signature(state)) return; // o'zgarish yo'q — qayta chizmaymiz
-  state = remote;
+  if(signature(merged) === signature(state)) return; // o'zgarish yo'q — qayta chizmaymiz
+  state = merged;
   render();
 }
 
-let saving = false, saveQueued = false;
+async function loadState(){
+  try{
+    applyRemote(await backend.get());
+    setSync(true, okText());
+  }catch(e){
+    // MUHIM: xatoda state tozalanmaydi — belgilar ekranda qoladi
+    setSync(false, "aloqa yo'q — qayta urinilmoqda");
+  }
+}
+
+let saving = false, saveQueued = false, retryTimer = null;
 async function saveState(){
   if(saving){ saveQueued = true; return; }
+
+  const patch = {};
+  pending.forEach((rec, id) => { patch[id] = rec.value; });
+  if(Object.keys(patch).length === 0) return;
+
   saving = true;
   try{
-    await backend.set(JSON.stringify(state));
-    setSync(true, SHARED ? "o'zgarishlar hammaga ko'rinadi" : "shu qurilmada saqlandi");
+    const items = await backend.patch(patch);
+    // Yuborilgan va shundan beri o'zgarmagan yozuvlarni navbatdan olamiz
+    Object.keys(patch).forEach(id => {
+      const rec = pending.get(id);
+      if(rec && rec.value === patch[id]) pending.delete(id);
+    });
+    applyRemote(items);
+    setSync(true, okText());
   }catch(e){
-    console.error("storage error", e);
-    setSync(false, "saqlanmadi — internetni tekshiring");
+    console.error("saqlash xatosi", e);
+    setSync(false, "saqlanmadi — qayta urinilmoqda");
+    if(!retryTimer) retryTimer = setTimeout(() => { retryTimer = null; saveState(); }, 5000);
   }
   saving = false;
   if(saveQueued){ saveQueued = false; saveState(); }
@@ -541,17 +574,37 @@ function render(){
   });
 }
 
-render();
-setSync(true, SHARED ? "o'zgarishlar hammaga ko'rinadi" : "shu qurilmada saqlanadi");
-loadState();
+async function init(){
+  render();
+  setSync(true, "ulanmoqda…");
 
-if(SHARED){
-  // boshqa foydalanuvchilarning o'zgarishlari uchun yengil polling
-  setInterval(loadState, 4000);
-}else{
-  // localStorage rejimida: boshqa tab o'zgartirsa xabar keladi, polling kerak emas
-  window.addEventListener("storage", e => { if(e.key === STORAGE_KEY) loadState(); });
+  try{
+    const items = await remoteBackend.get();
+    backend = remoteBackend;
+    SHARED = true;
+    applyRemote(items);
+    setSync(true, okText());
+  }catch(e){
+    backend = localBackend;
+    SHARED = false;
+    applyRemote(await localBackend.get());
+    setSync(false, "umumiy saqlash ulanmagan — faqat shu qurilmada");
+  }
+
+  if(SHARED){
+    // Boshqa foydalanuvchilarning o'zgarishlari uchun yengil polling.
+    // Tab ko'rinmayotganda so'rov yubormaymiz — bepul limitni tejaydi.
+    setInterval(() => { if(!document.hidden) loadState(); }, POLL_MS);
+    document.addEventListener("visibilitychange", () => {
+      if(!document.hidden) loadState();
+    });
+  }else{
+    // localStorage rejimida boshqa tab o'zgartirsa xabar keladi
+    window.addEventListener("storage", e => { if(e.key === STORAGE_KEY) loadState(); });
+  }
 }
+
+init();
 </script>
 </body>
 </html>
