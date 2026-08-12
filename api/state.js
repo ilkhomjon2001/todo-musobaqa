@@ -1,46 +1,60 @@
-// Umumiy ToDo holati — Upstash Redis (Vercel Marketplace) REST API orqali.
-// Kalitlar server tomonda, env o'zgaruvchilarida turadi — repo'ga tushmaydi.
+// Umumiy ToDo holati — Supabase (PostgREST) orqali.
+// Service role kaliti faqat server tomonda ishlatiladi: brauzerga ham,
+// repo'ga ham tushmaydi. Vercel Supabase integratsiyasi env'ni o'zi ulaydi.
 
-const REST_URL =
-  process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
-const REST_TOKEN =
-  process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+const SUPABASE_URL =
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SERVICE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
 
-const HASH_KEY = "musobaqa-todo-state";
+const TABLE = "todo_state";
 
 // Suiiste'molga qarshi oddiy chegaralar
 const MAX_FIELDS = 500;
 const MAX_ID_LEN = 32;
 const ID_RE = /^[a-z0-9-]+$/i;
 
-async function redis(command) {
-  const res = await fetch(REST_URL, {
-    method: "POST",
-    headers: {
-      Authorization: "Bearer " + REST_TOKEN,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(command),
-  });
-  if (!res.ok) {
-    throw new Error("upstash " + res.status + " " + (await res.text()));
-  }
-  const json = await res.json();
-  if (json.error) throw new Error("upstash: " + json.error);
-  return json.result;
+function base() {
+  return String(SUPABASE_URL).replace(/\/+$/, "") + "/rest/v1/" + TABLE;
 }
 
-// HGETALL Upstash'da tekis massiv qaytaradi: [field, value, field, value, ...]
-function toItems(flat) {
+function headers(extra) {
+  return Object.assign(
+    {
+      apikey: SERVICE_KEY,
+      Authorization: "Bearer " + SERVICE_KEY,
+      "Content-Type": "application/json",
+    },
+    extra || {}
+  );
+}
+
+async function readAll() {
+  const res = await fetch(base() + "?select=id,done", { headers: headers() });
+  if (!res.ok) throw new Error("supabase " + res.status + " " + (await res.text()));
+  const rows = await res.json();
   const items = {};
-  if (Array.isArray(flat)) {
-    for (let i = 0; i < flat.length; i += 2) {
-      items[flat[i]] = flat[i + 1] === "1";
-    }
-  } else if (flat && typeof flat === "object") {
-    for (const k of Object.keys(flat)) items[k] = flat[k] === "1";
-  }
+  for (const row of rows) items[row.id] = row.done === true;
   return items;
+}
+
+async function writePatch(patch) {
+  const now = new Date().toISOString();
+  const rows = Object.keys(patch).map((id) => ({
+    id,
+    done: patch[id],
+    updated_at: now,
+  }));
+
+  // on_conflict=id + merge-duplicates => faqat shu qatorlar yangilanadi.
+  // Boshqa bandlarga tegilmaydi, shuning uchun parallel belgilashda
+  // biri ikkinchisining belgisini o'chirmaydi.
+  const res = await fetch(base() + "?on_conflict=id", {
+    method: "POST",
+    headers: headers({ Prefer: "resolution=merge-duplicates,return=minimal" }),
+    body: JSON.stringify(rows),
+  });
+  if (!res.ok) throw new Error("supabase " + res.status + " " + (await res.text()));
 }
 
 function readPatch(req) {
@@ -68,37 +82,37 @@ function readPatch(req) {
 module.exports = async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
-  if (!REST_URL || !REST_TOKEN) {
+  if (!SUPABASE_URL || !SERVICE_KEY) {
     return res.status(503).json({
       error: "storage_not_configured",
-      hint: "Vercel > Storage > Upstash Redis ni loyihaga ulang",
+      hint: "Vercel > Storage > Supabase > Connect to Project qiling, keyin redeploy",
     });
   }
 
   try {
     if (req.method === "GET") {
-      const items = toItems(await redis(["HGETALL", HASH_KEY]));
-      return res.status(200).json({ items });
+      return res.status(200).json({ items: await readAll() });
     }
 
     if (req.method === "POST") {
       const patch = readPatch(req);
       if (!patch) return res.status(400).json({ error: "bad_patch" });
-
-      // Bitta HSET bilan — faqat o'zgargan bandlar yoziladi, shuning uchun
-      // ikki kishi bir vaqtda belgilaganda biri ikkinchisini o'chirmaydi.
-      const args = ["HSET", HASH_KEY];
-      for (const id of Object.keys(patch)) args.push(id, patch[id] ? "1" : "0");
-      await redis(args);
-
-      const items = toItems(await redis(["HGETALL", HASH_KEY]));
-      return res.status(200).json({ items });
+      await writePatch(patch);
+      return res.status(200).json({ items: await readAll() });
     }
 
     res.setHeader("Allow", "GET, POST");
     return res.status(405).json({ error: "method_not_allowed" });
   } catch (e) {
-    console.error("state api error:", e);
+    const msg = String(e && e.message);
+    console.error("state api error:", msg);
+    // Jadval hali yaratilmagan bo'lsa — aniq xabar beramiz
+    if (/PGRST205|does not exist|Could not find the table/i.test(msg)) {
+      return res.status(503).json({
+        error: "table_missing",
+        hint: "Supabase SQL Editor'da todo_state jadvalini yarating (README'ga qarang)",
+      });
+    }
     return res.status(502).json({ error: "storage_unavailable" });
   }
 };

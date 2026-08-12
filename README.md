@@ -8,45 +8,78 @@ o'zgarish hammaga ko'rinadi.
 
 ```
 index.html      — butun sahifa (HTML + CSS + JS, build kerak emas)
-api/state.js    — Vercel serverless funksiya (GET/POST), Upstash Redis'ga yozadi
+api/state.js    — Vercel serverless funksiya (GET/POST), Supabase'ga yozadi
+test/e2e.js     — soxta Supabase bilan uchdan-uchiga test (node test/e2e.js)
 ```
 
-## Vercel'da sozlash
+## Sozlash
 
-1. **Deploy.** Vercel → Add New → Project → shu repo. Framework Preset: **Other**.
-   Build buyrug'i kerak emas.
+### 1. Supabase'ni loyihaga ulash
 
-2. **Upstash Redis'ni ulash (bepul).**
-   Vercel loyihasi → **Storage** → **Upstash — Serverless DB (Redis)** →
-   Create → loyihaga **Connect** qiling.
+Vercel → **Storage** → Supabase → **Connect to Project**.
+Shundan keyin Vercel `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` kabi env
+o'zgaruvchilarni avtomatik qo'shadi. Kod ularni o'zi topadi.
 
-   Vercel `KV_REST_API_URL` va `KV_REST_API_TOKEN` env o'zgaruvchilarini
-   avtomatik qo'shadi. Kod ularni o'zi topadi — qo'lda hech narsa yozish
-   shart emas. (`UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`
-   nomlari ham qo'llab-quvvatlanadi.)
+> Service role kaliti **faqat serverda** ishlatiladi — brauzerga ham,
+> repo'ga ham tushmaydi.
 
-3. **Redeploy.** Env o'zgaruvchilar qo'shilgach bir marta qayta deploy qiling —
-   aks holda funksiya ularni ko'rmaydi.
+### 2. Jadval yaratish
 
-Tekshirish: `https://<sayt>/api/state` ochilganda `{"items":{...}}` chiqishi kerak.
-Agar `storage_not_configured` chiqsa — 2-qadam bajarilmagan yoki redeploy qilinmagan.
+Supabase → **SQL Editor** → shuni ishga tushiring:
+
+```sql
+create table if not exists todo_state (
+  id         text primary key,
+  done       boolean not null default false,
+  updated_at timestamptz not null default now()
+);
+
+-- RLS yoqilgan, hech qanday policy yo'q:
+-- faqat service_role (ya'ni bizning serverless funksiyamiz) kira oladi.
+alter table todo_state enable row level security;
+```
+
+### 3. Redeploy
+
+Env o'zgaruvchilar qo'shilgach bir marta qayta deploy qiling — aks holda
+funksiya ularni ko'rmaydi.
+
+### Tekshirish
+
+`https://<sayt>/api/state` ochilsin:
+
+| Javob | Ma'nosi |
+|---|---|
+| `{"items":{}}` | hammasi tayyor |
+| `storage_not_configured` | 1-qadam yoki redeploy qilinmagan |
+| `table_missing` | 2-qadam bajarilmagan |
 
 ## Bepul limit
 
-Upstash bepul tarifi ~500K buyruq/oy. Sahifa har 8 soniyada bir marta so'rov
-yuboradi va **tab ko'rinmayotganda so'rov yubormaydi**. Ya'ni bitta ochiq tab
-soatiga ~450 buyruq. Musobaqa kuni 20 kishi 10 soat ochiq tutsa ham ~90K —
-limitga yetmaydi.
+Supabase Free Plan bu yuk uchun juda katta zaxira beradi. Sahifa har 8
+soniyada bir so'rov yuboradi va **tab ko'rinmayotganda umuman so'ramaydi**.
+Bitta ochiq tab soatiga ~450 so'rov; musobaqa kuni 20 kishi 10 soat ochiq
+tutsa ~90K — muammo emas.
 
 ## Backend bo'lmasa
 
-`/api/state` javob bermasa (lokal fayl, oflayn, Upstash ulanmagan) sahifa
+`/api/state` javob bermasa (lokal fayl, oflayn, Supabase ulanmagan) sahifa
 `localStorage`ga tushadi: belgilar yo'qolmaydi, lekin faqat shu qurilmada
 saqlanadi. Pastdagi nuqta to'q sariq rangga o'tib buni ko'rsatadi.
 
-## Ma'lumot qayerda
+## Ma'lumot qanday saqlanadi
 
-Redis'da bitta hash: `musobaqa-todo-state`, har band `s1-0` ko'rinishidagi
-field, qiymati `"1"` yoki `"0"`. Saqlashda faqat **o'zgargan** bandlar
-yuboriladi, shuning uchun ikki kishi bir vaqtda belgilaganda biri
+Har bir band — alohida qator (`id` = `s1-0`, `done` = true/false).
+Saqlashda faqat **o'zgargan** bandlar yuboriladi (`on_conflict=id` upsert),
+shuning uchun ikki kishi bir vaqtda turli bandlarni belgilaganda biri
 ikkinchisining belgisini o'chirmaydi.
+
+## Test
+
+```
+node test/e2e.js
+```
+
+Supabase'ni soxtalashtiradi va ikki brauzer nusxasini simulyatsiya qiladi:
+sinxronizatsiya, parallel belgilash, uncheck, poll paytidagi bosish,
+jadval yo'q holati, yaroqsiz ma'lumotni rad etish.
